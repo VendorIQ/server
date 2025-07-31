@@ -10,6 +10,21 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@types/node": "^22.13.11"
+    "@google/generative-ai": "^0.24.1",
+    "@supabase/supabase-js": "^2.52.0",
+    "@types/node": "^22.13.11",
+    "canvas": "^3.1.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.0",
+    "express": "^5.1.0",
+    "fs": "^0.0.1-security",
+    "multer": "^2.0.2",
+    "node-fetch": "^2.7.0",
+    "path": "^0.12.7",
+    "pdf-lib": "^1.17.1",
+    "pdf-parse": "^1.1.1",
+    "react": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "tesseract.js": "^6.0.1"
   }
 }
