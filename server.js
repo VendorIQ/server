@@ -244,22 +244,29 @@ app.post("/api/check-file", upload.single("file"), async (req, res) => {
         .replace(/[^a-z0-9 ]/gi, "");
       const docTextNorm = text.toLowerCase().replace(/[^a-z0-9 ]/gi, "");
       const supplierWords = supplierName.split(" ").filter((w) => w.length > 2);
-
-      // Check if at least 2 significant words from supplier name are present
-      let matchCount = 0;
-      supplierWords.forEach((word) => {
-        if (docTextNorm.includes(word)) matchCount++;
-      });
-
-      if (matchCount < Math.min(2, supplierWords.length)) {
-        return res.json({
-          success: false,
-          feedback: `Document does not clearly mention the supplier name detected from your OHS Policy: "${data.supplier_name}". Please check or correct your company name. [You can manually set your company name if this keeps happening.]`,
-          requireCompanyNameConfirmation: true,
-          detectedCompanyName: data.supplier_name,
-        });
-      }
-    }
+   // --- ADD THE DEBUG LOGS RIGHT HERE ---
+   console.log("Supplier Name in DB:", supplierName);
+   console.log("Supplier Words:", supplierWords);
+   console.log("First 500 chars of Document:", docTextNorm.slice(0, 500));
+ 
+   // Check if at least 2 significant words from supplier name are present
+   let matchCount = 0;
+   supplierWords.forEach((word) => {
+     if (docTextNorm.includes(word)) matchCount++;
+   });
+ 
+   // --- AND HERE ---
+   console.log("Match count:", matchCount);
+ 
+   if (matchCount < Math.min(2, supplierWords.length)) {
+     return res.json({
+       success: false,
+       feedback: `Document does not clearly mention the supplier name detected from your OHS Policy: "${data.supplier_name}". Please check or correct your company name. [You can manually set your company name if this keeps happening.]`,
+       requireCompanyNameConfirmation: true,
+       detectedCompanyName: data.supplier_name,
+     });
+   }
+ }
     // === END PATCH ===
 
     const questionText = getQuestionText(qNum);
