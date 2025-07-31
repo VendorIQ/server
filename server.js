@@ -258,7 +258,7 @@ app.post("/api/check-file", upload.single("file"), async (req, res) => {
    // --- AND HERE ---
    console.log("Match count:", matchCount);
  
-   if (matchCount < Math.min(2, supplierWords.length)) {
+   if (matchCount < 2) {
      return res.json({
        success: false,
        feedback: `Document does not clearly mention the supplier name detected from your OHS Policy: "${data.supplier_name}". Please check or correct your company name. [You can manually set your company name if this keeps happening.]`,
