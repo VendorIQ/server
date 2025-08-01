@@ -155,6 +155,14 @@ app.get("/api/all-answers", async (req, res) => {
   }
 });
 // Smarter extraction for supplier/company name from document text
+// --- Normalize string: lowercase, remove special chars, collapse spaces ---
+function normalize(str) {
+  return (str || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 function extractCompanyName(text) {
   const lines = text
     .split("\n")
@@ -238,35 +246,32 @@ app.post("/api/check-file", upload.single("file"), async (req, res) => {
             "No official supplier/company name was found from your OHS Policy (Q1R1). Please upload it first, or ensure your document clearly states your company name.",
         });
       }
-      const supplierName = data.supplier_name
-        .trim()
-        .toLowerCase()
-        .replace(/[^a-z0-9 ]/gi, "");
-      const docTextNorm = text.toLowerCase().replace(/[^a-z0-9 ]/gi, "");
-      const supplierWords = supplierName.split(" ").filter((w) => w.length > 2);
-   // --- ADD THE DEBUG LOGS RIGHT HERE ---
-   console.log("Supplier Name in DB:", supplierName);
-   console.log("Supplier Words:", supplierWords);
-   console.log("First 500 chars of Document:", docTextNorm.slice(0, 500));
- 
-   // Check if at least 2 significant words from supplier name are present
-   let matchCount = 0;
-   supplierWords.forEach((word) => {
-     if (docTextNorm.includes(word)) matchCount++;
-   });
- 
-   // --- AND HERE ---
-   console.log("Match count:", matchCount);
- 
-   if (matchCount < 2) {
-     return res.json({
-       success: false,
-       feedback: `Document does not clearly mention the supplier name detected from your OHS Policy: "${data.supplier_name}". Please check or correct your company name. [You can manually set your company name if this keeps happening.]`,
-       requireCompanyNameConfirmation: true,
-       detectedCompanyName: data.supplier_name,
-     });
-   }
- }
+      const supplierNameNorm = normalize(data.supplier_name);
+const docTextNorm = normalize(text);
+
+const supplierWords = supplierNameNorm.split(" ").filter(w => w.length > 2);
+
+console.log("Supplier Name in DB (normalized):", supplierNameNorm);
+console.log("Supplier Words:", supplierWords);
+console.log("First 500 chars of Document (normalized):", docTextNorm.slice(0, 500));
+
+// Lower threshold for short names
+const requiredMatches = supplierWords.length <= 2 ? 1 : 2;
+let matchCount = 0;
+supplierWords.forEach(word => {
+  if (docTextNorm.includes(word)) matchCount++;
+});
+console.log("Match count:", matchCount, "| Required:", requiredMatches);
+
+if (matchCount < requiredMatches) {
+  return res.json({
+    success: false,
+    feedback: `Document does not clearly mention the supplier name detected from your OHS Policy: "${data.supplier_name}". Please check or correct your company name. [You can manually set your company name if this keeps happening.]`,
+    requireCompanyNameConfirmation: true,
+    detectedCompanyName: data.supplier_name,
+  });
+}
+
     // === END PATCH ===
 
     const questionText = getQuestionText(qNum);
