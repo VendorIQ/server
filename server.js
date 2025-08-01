@@ -20,7 +20,6 @@ const corsOptions = {
   methods: ["GET", "POST"],
   credentials: false,
 };
-
 app.use(cors(corsOptions));
 app.use(express.json());
 
@@ -65,110 +64,31 @@ const questionData = [
     },
   },
 ];
-async function callGroq(
-  prompt,
-  systemPrompt = "You are an OHS compliance auditor.",
-) {
-  console.log("Calling Groq API with prompt length:", prompt.length);
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: prompt },
-      ],
-      stream: false,
-    }),
-  });
-  console.log("Groq API responded with status:", res.status);
-  const data = await res.json();
-  console.log("Groq API response data:", data);
-  if (!res.ok) {
-    console.error("Groq API ERROR - Status:", res.status);
-    console.error("Groq API ERROR - Body:", JSON.stringify(data, null, 2));
-    throw new Error(
-      data.error?.message ||
-        data.error ||
-        JSON.stringify(data) ||
-        "Groq API error",
-    );
-  }
-  return data.choices?.[0]?.message?.content || "";
-}
 
-function getScoringGuide(qNumber) {
-  const q = questionData.find((q) => q.number === qNumber);
-  if (!q) return "";
-  return Object.entries(q.scoring)
-    .map(([band, desc]) => `- ${band.toUpperCase()}: ${desc}\n`)
-    .join("\n");
-}
+// --- AI-based Company Name Extraction ---
+async function extractCompanyNameAI(text) {
+  const prompt = `
+Extract the company or organization name from the following document. 
+Return ONLY the exact company name as it appears. If the company name is not present or cannot be determined, return "NOT FOUND".
 
-function getQuestionText(qNumber) {
-  const q = questionData.find((q) => q.number === qNumber);
-  return q ? q.text : "";
-}
-
-// --- Text Extraction ---
-async function extractText(localPath, originalName) {
-  const ext = originalName.split(".").pop().toLowerCase();
-  if (ext === "pdf") {
-    const data = await pdfParse(fs.readFileSync(localPath));
-    return data.text;
-  } else if (["jpg", "jpeg", "png"].includes(ext)) {
-    for (const lang of ["tha", "ind", "vie", "eng"]) {
-      try {
-        const {
-          data: { text },
-        } = await Tesseract.recognize(localPath, lang);
-        if (text && text.trim().length > 10) return text;
-      } catch (e) {}
-    }
-    return "";
-  } else if (["txt"].includes(ext)) {
-    return fs.readFileSync(localPath, "utf-8");
-  }
-  return "";
-}
-// === Get all answers for auditor ===
-app.get("/api/all-answers", async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from("answers")
-      .select("*")
-      .order("updated_at", { ascending: false });
-
-    if (error) {
-      console.error("❌ Failed to fetch answers:", error);
-      return res.status(500).json({ error: "Failed to fetch answers." });
-    }
-
-    res.json(data);
-  } catch (err) {
-    console.error("❌ /api/all-answers failed:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-// Smarter extraction for supplier/company name from document text
-// --- Normalize string: lowercase, remove special chars, collapse spaces ---
-function normalize(str) {
-  return (str || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9 ]/gi, " ")
-    .replace(/\s+/g, " ")
+---
+${text}
+`;
+  const result = await callGroq(
+    prompt,
+    "You are a compliance assistant that extracts company names from OHS documents.",
+  );
+  return (result || "")
+    .split("\n")[0]
+    .replace(/^["']|["']$/g, "")
     .trim();
 }
-function extractCompanyName(text) {
+// --- Regex/Pattern fallback extraction (pure sync!) ---
+function extractCompanyNamePattern(text) {
   const lines = text
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.length > 2);
-
   // Try lines with "company name" or "supplier"
   for (const line of lines) {
     const match = line.match(/(?:company name|supplier)[:\-]\s*(.+)$/i);
@@ -184,20 +104,145 @@ function extractCompanyName(text) {
       return line;
     }
   }
-  // Fallback: first line with 2+ words, all alphabetic
+  const companyKeywords = [
+    "company",
+    "pt",
+    "ltd",
+    "corp",
+    "corporation",
+    "inc",
+    "co",
+    "tbk",
+    "limited",
+    "s.a.",
+    "llc",
+  ];
   for (const line of lines) {
-    if (line.split(" ").length >= 2 && /^[a-zA-Z\s.]+$/.test(line)) {
+    if (
+      line.split(" ").length >= 2 &&
+      /^[a-zA-Z\s.]+$/.test(line) &&
+      companyKeywords.some((word) => line.toLowerCase().includes(word))
+    ) {
       return line;
     }
   }
-  // Last fallback: first non-empty line
-  return lines[0] || "";
+  // Last fallback: nothing detected
+  return "";
+}
+async function callGroq(
+  prompt,
+  systemPrompt = "You are an OHS compliance auditor.",
+) {
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: prompt },
+      ],
+      stream: false,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(
+      data.error?.message ||
+        data.error ||
+        JSON.stringify(data) ||
+        "Groq API error",
+    );
+  }
+  return data.choices?.[0]?.message?.content || "";
+}
+function getScoringGuide(qNumber) {
+  const q = questionData.find((q) => q.number === qNumber);
+  if (!q) return "";
+  return Object.entries(q.scoring)
+    .map(([band, desc]) => `- ${band.toUpperCase()}: ${desc}\n`)
+    .join("\n");
+}
+function getQuestionText(qNumber) {
+  const q = questionData.find((q) => q.number === qNumber);
+  return q ? q.text : "";
+}
+// --- Text Extraction ---
+async function extractText(localPath, originalName, ocrLang = "eng") {
+  const ext = originalName.split(".").pop().toLowerCase();
+  let extractedText = "";
+
+  if (ext === "pdf") {
+    // Try native PDF text extraction first
+    const data = await pdfParse(fs.readFileSync(localPath));
+    if (data.text && data.text.trim().length > 10) {
+      extractedText = data.text;
+    } else {
+      // Fallback: OCR on the PDF (as an image)
+      try {
+        const {
+          data: { text },
+        } = await Tesseract.recognize(localPath, ocrLang);
+        extractedText = text;
+      } catch (e) {
+        extractedText = "";
+      }
+    }
+  } else if (["jpg", "jpeg", "png"].includes(ext)) {
+    try {
+      const {
+        data: { text },
+      } = await Tesseract.recognize(localPath, ocrLang);
+      extractedText = text;
+    } catch (e) {
+      extractedText = "";
+    }
+  } else if (["txt"].includes(ext)) {
+    extractedText = fs.readFileSync(localPath, "utf-8");
+  }
+  // ---- DEBUG LOG ----
+  console.log("Extracted text:", extractedText);
+  return extractedText;
+}
+
+// === Get all answers for auditor ===
+app.get("/api/all-answers", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("answers")
+      .select("*")
+      .order("updated_at", { ascending: false });
+    if (error) {
+      return res.status(500).json({ error: "Failed to fetch answers." });
+    }
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+// --- Normalize for comparison ---
+function normalize(str) {
+  return (str || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+function normalizeCompanyName(str) {
+  return (str || "")
+    .toLowerCase()
+    .replace(/(private|pvt|limited|ltd|inc|corp|company|co|plc)/g, "") // remove company type suffixes
+    .replace(/[^a-z0-9]/g, "") // remove all non-alphanumeric
+    .replace(/\s+/g, ""); // remove spaces
 }
 // --- File Upload & Check Endpoint ---
-
 app.post("/api/check-file", upload.single("file"), async (req, res) => {
   try {
-    const { email, questionNumber, userExplanation, companyName: suppliedCompanyName } = req.body;
+    const { email, questionNumber, userExplanation, ocrLang } = req.body;
+    const lang = ocrLang || "eng";
     if (!req.file)
       return res.json({ success: false, feedback: "No file uploaded." });
 
@@ -208,9 +253,26 @@ app.post("/api/check-file", upload.single("file"), async (req, res) => {
         feedback: "Invalid or missing question number.",
       });
 
+    // Always fetch company name from database (set at Auth page)
+    const { data } = await supabase
+      .from("supplier_names")
+      .select("supplier_name")
+      .eq("email", email)
+      .single();
+
+    const officialCompanyName = data?.supplier_name?.trim();
+    if (!officialCompanyName) {
+      return res.json({
+        success: false,
+        feedback:
+          "No official supplier/company name found from your login/profile. Please contact support or update your profile.",
+      });
+    }
+
+    // Extract document text
     const filePath = req.file.path;
     const fileName = req.file.originalname;
-    const text = await extractText(filePath, fileName);
+    const text = await extractText(filePath, fileName, lang);
     fs.unlinkSync(filePath);
 
     if (!text || !text.trim()) {
@@ -221,69 +283,48 @@ app.post("/api/check-file", upload.single("file"), async (req, res) => {
       });
     }
 
-    // === PATCH: Supplier Name Extraction & Enforcement ===
-    // 1. Always auto-update supplier_names table if a new/corrected name is provided!
-    let officialCompanyName = suppliedCompanyName;
-    if (suppliedCompanyName && suppliedCompanyName.trim()) {
-      await supabase.from("supplier_names").upsert(
-        {
-          email,
-          supplier_name: suppliedCompanyName.trim(),
-          extracted_at: new Date().toISOString(),
-        },
-        { onConflict: ["email"] }
+    // --- Consistency check: is the official name found in the document?
+    const normalize = (str) =>
+      (str || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9 ]/gi, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    // Extract all candidate company name lines from document
+    const lines = text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 4);
+
+    // Find all lines that look like a company name (has 'metro', 'telwork', 'limited', etc)
+    const candidateNames = lines.filter((l) => {
+      return (
+        l.toLowerCase().includes("metro") &&
+        (l.toLowerCase().includes("telwork") ||
+          l.toLowerCase().includes("telworks"))
       );
-    }
-
-    // 2. For Q1: Extract & suggest company name if not provided.
-    if (qNum === 1 && (!suppliedCompanyName || !suppliedCompanyName.trim())) {
-      const detected = extractCompanyName(text);
-      return res.json({
-        success: true,
-        feedback: `Detected company name: "${detected}". Please confirm or correct this.`,
-        detectedCompanyName: detected,
-        requireCompanyNameConfirmation: true,
-      });
-    }
-
-    // 3. For Q2, Q3, ...: Always check against latest name (from supplied OR DB)
-    if (!officialCompanyName) {
-      const { data } = await supabase
-        .from("supplier_names")
-        .select("supplier_name")
-        .eq("email", email)
-        .single();
-      officialCompanyName = data?.supplier_name;
-    }
-
-    if (!officialCompanyName) {
-      return res.json({
-        success: false,
-        feedback:
-          "No official supplier/company name was found from your OHS Policy (Q1R1) or your profile. Please upload it first, or ensure your document clearly states your company name.",
-      });
-    }
-
-    // --- Consistency check
-    const supplierNameNorm = normalize(officialCompanyName);
-    const docTextNorm = normalize(text);
-    const supplierWords = supplierNameNorm.split(" ").filter(w => w.length > 2);
-    const requiredMatches = supplierWords.length <= 2 ? 1 : 2;
-    let matchCount = 0;
-    supplierWords.forEach(word => {
-      if (docTextNorm.includes(word)) matchCount++;
     });
 
-    if (matchCount < requiredMatches) {
+    // Add the officialCompanyName as well for matching
+    candidateNames.push(officialCompanyName);
+
+    // Try to find a fuzzy match
+    const normalizedAuth = normalizeCompanyName(officialCompanyName);
+    const hasMatch = candidateNames.some(
+      (l) => normalizeCompanyName(l) === normalizedAuth,
+    );
+
+    if (!hasMatch) {
       return res.json({
         success: false,
-        feedback: `Document does not clearly mention the supplier name: "${officialCompanyName}". Please check or correct your company name. [You can manually set your company name if this keeps happening.]`,
+        feedback: `Document does not clearly mention the registered company name: "${officialCompanyName}". Please re-upload a document that contains your company name as registered.`,
         requireCompanyNameConfirmation: true,
         detectedCompanyName: officialCompanyName,
       });
     }
 
-    // --- Continue with AI review as normal
+    // --- Prepare AI review prompt
     const questionText = getQuestionText(qNum);
     const scoringGuide = getScoringGuide(qNum);
     const explanationSection = userExplanation
@@ -293,7 +334,24 @@ app.post("/api/check-file", upload.single("file"), async (req, res) => {
     const prompt = `
 You are an OHS compliance auditor. For the following question, review the vendor's uploaded document${userExplanation ? " and user explanation" : ""} and provide:
 
-[rest of your prompt as before, unchanged]
+- A concise summary of the document's compliance with the requirement.
+- Identify any missing elements, weaknesses, or best practices.
+- Assign a score using ONLY: Stretch (5/5), Commitment (4/5), Robust (3/5), Warning (2/5), Offtrack (1/5)
+- Use this format:
+Summary: ...
+Missing: ...
+Score: ...
+Recommendation: ...
+---
+QUESTION:
+${questionText}
+
+SCORING GUIDE:
+${scoringGuide}
+${explanationSection}
+COMPANY NAME (from user profile/auth): ${officialCompanyName}
+DOCUMENT TEXT:
+${text}
 `;
 
     const feedback = await callGroq(prompt);
@@ -305,6 +363,7 @@ You are an OHS compliance auditor. For the following question, review the vendor
     if (match) {
       score = parseInt(match[2], 10);
     }
+
     await supabase.from("answers").upsert(
       {
         email,
@@ -317,10 +376,22 @@ You are an OHS compliance auditor. For the following question, review the vendor
 
     res.json({ success: true, score, feedback });
   } catch (err) {
-    console.error("ERROR in /api/check-file (groq):", err);
     res.status(500).json({ error: err.message });
   }
 });
+// --- Extract all numeric scores from feedback (Score: ... (X/5)) ---
+function extractAllScores(feedbackText) {
+  // Accepts a string and returns array of numbers (can be empty)
+  const scores = [];
+  if (!feedbackText) return scores;
+  // Match all occurrences of Score: (text) (X/5)
+  const regex = /Score:\s*(?:\w+\s*)?\(?(\d{1,3})\/?5?\)?/gi;
+  let match;
+  while ((match = regex.exec(feedbackText))) {
+    if (match[1]) scores.push(Number(match[1]));
+  }
+  return scores;
+}
 
 // --- Session Summary Endpoint ---
 app.post("/api/session-summary", express.json(), async (req, res) => {
@@ -338,6 +409,21 @@ app.post("/api/session-summary", express.json(), async (req, res) => {
         .json({ feedback: "No answer data found for this email." });
     }
 
+    // === NEW: Calculate the pure average ===
+    let total = 0;
+    let count = 0;
+    for (const ans of answers) {
+      // This handles multiple requirements in a single feedback if present
+      const scores = extractAllScores(ans.upload_feedback);
+      for (const s of scores) {
+        total += s;
+        count++;
+      }
+    }
+    const maxPossible = count * 5;
+    const overallScore = count ? Math.round((total / maxPossible) * 100) : 0;
+
+    // === Build the summary prompt as before ===
     let summaryPrompt = `You are a supplier compliance auditor. Here is a supplier's interview session:\n\n`;
     for (const ans of answers) {
       summaryPrompt += `Question ${ans.question_number}: ${getQuestionText(ans.question_number)}\n`;
@@ -348,34 +434,54 @@ app.post("/api/session-summary", express.json(), async (req, res) => {
         summaryPrompt += `Skipped/Reason: ${ans.skip_reason}\n`;
       summaryPrompt += `\n`;
     }
-    summaryPrompt += `\nSummarize this supplier's OHS compliance in under 5 sentences. List strengths, weaknesses, and give a score (0-100). Return JSON with \"feedback\" and \"score\".`;
+    summaryPrompt += `\nSummarize this supplier's OHS compliance in under 10 sentences. List strengths, weaknesses, and give a score (0-100). Return JSON with "feedback" and "score".`;
 
+    // Still call the AI for the summary text, but ignore its score!
     const aiText = await callGroq(summaryPrompt);
+
     let feedback = aiText;
-    let score = null;
+    // Try to extract the feedback field from the AI reply (if it's JSON)
     try {
       const match = aiText.match(/\{[\s\S]*\}/m);
       if (match) {
         const json = JSON.parse(match[0]);
         feedback = json.feedback || feedback;
-        score = json.score || null;
-      } else {
-        const numMatch = aiText.match(/score\s*[:=]\s*(\d{1,3})/i);
-        if (numMatch) score = parseInt(numMatch[1], 10);
+        // DO NOT use json.score, override below!
       }
     } catch (e) {}
 
     await supabase
       .from("sessions")
-      .update({ gemini_summary: feedback, gemini_score: score })
+      .update({ gemini_summary: feedback, gemini_score: overallScore })
       .eq("email", email);
 
-    res.json({ feedback, score });
+    // === Respond with our own calculated score ===
+    res.json({ feedback, score: overallScore });
   } catch (err) {
     console.error("ERROR in /api/session-summary:", err);
     res.status(500).json({ feedback: "Failed to generate summary." });
   }
+  // At the end of your /api/session-summary endpoint:
+  const detailedScores = answers.map((ans) => {
+    const matches = [];
+    if (ans.upload_feedback) {
+      // You may have multiple requirements in a single feedback (if you allow bulk upload)
+      const regex = /Score:\s*\w+\s*\((\d)\/5\)/gi;
+      let m;
+      while ((m = regex.exec(ans.upload_feedback))) {
+        matches.push(Number(m[1]));
+      }
+    }
+    return {
+      questionNumber: ans.question_number,
+      answer: ans.answer,
+      requirementScores: matches,
+      upload_feedback: ans.upload_feedback,
+    };
+  });
+  res.json({ feedback, score: overallScore, detailedScores });
 });
+
 // Add to your server.js
 
 app.post("/api/missing-feedback", upload.none(), async (req, res) => {
@@ -442,13 +548,17 @@ app.post("/api/save-answer", async (req, res) => {
   if (!email || !questionNumber || !answer) {
     return res.status(400).json({ error: "Missing fields" });
   }
-
+  let upload_feedback = null;
+  if (answer === "No") {
+    upload_feedback = "Score: Offtrack (1/5)\nSummary: User answered 'No'.";
+  }
   try {
     const result = await supabase.from("answers").upsert(
       {
         email,
         question_number: parseInt(questionNumber),
         answer,
+        upload_feedback, // PATCHED: only set if No, otherwise null
         updated_at: new Date().toISOString(),
       },
       { onConflict: ["email", "question_number"] },
@@ -514,8 +624,12 @@ app.post("/api/disagree-feedback", upload.single("file"), async (req, res) => {
     const { email, questionNumber, requirement, disagreeReason } = req.body;
     let fileText = "";
     if (req.file) {
-      fileText = await extractText(req.file.path, req.file.originalname);
-      console.log("Extracted disagreement file text:\n", fileText); // <-- Add this!
+      fileText = await extractText(
+        req.file.path,
+        req.file.originalname,
+        req.body.ocrLang || "eng",
+      );
+      console.log("Extracted disagreement file text:\n", fileText);
       fs.unlinkSync(req.file.path);
     }
 
@@ -571,7 +685,6 @@ app.post("/api/set-supplier-name", async (req, res) => {
   if (!email || !supplierName) {
     return res.status(400).json({ success: false, message: "Missing fields" });
   }
-
   try {
     await supabase.from("supplier_names").upsert(
       {
@@ -583,14 +696,11 @@ app.post("/api/set-supplier-name", async (req, res) => {
     );
     res.json({ success: true, supplierName });
   } catch (err) {
-    console.error("Set supplier name error:", err);
     res
       .status(500)
       .json({ success: false, message: "Failed to set supplier name." });
   }
 });
-
-// PATCH: Get supplier name for frontend
 app.get("/api/get-supplier-name", async (req, res) => {
   const { email } = req.query;
   if (!email) return res.status(400).json({ supplierName: "" });
@@ -603,6 +713,26 @@ app.get("/api/get-supplier-name", async (req, res) => {
 });
 console.log("GROQ_API_KEY exists?", !!process.env.GROQ_API_KEY);
 console.log("GROQ_MODEL is", process.env.GROQ_MODEL);
+app.post("/api/skip-requirement", async (req, res) => {
+  const { email, questionNumber, requirementIdx } = req.body;
+  if (!email || !questionNumber) {
+    return res.status(400).json({ error: "Missing fields" });
+  }
+
+  // Insert or update with a lowest score
+  await supabase.from("answers").upsert(
+    {
+      email,
+      question_number: parseInt(questionNumber),
+      answer: "Skipped",
+      upload_feedback: `Score: Offtrack (1/5)\nSummary: Requirement skipped.`,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: ["email", "question_number"] },
+  );
+  res.json({ success: true });
+});
+
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`VendorIQ Groq API listening on port ${PORT}`);
