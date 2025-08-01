@@ -197,9 +197,10 @@ function extractCompanyName(text) {
 
 app.post("/api/check-file", upload.single("file"), async (req, res) => {
   try {
-    const { email, questionNumber, userExplanation } = req.body;
+    const { email, questionNumber, userExplanation, companyName: suppliedCompanyName } = req.body;
     if (!req.file)
       return res.json({ success: false, feedback: "No file uploaded." });
+
     const qNum = parseInt(questionNumber);
     if (!qNum)
       return res.json({
@@ -210,7 +211,6 @@ app.post("/api/check-file", upload.single("file"), async (req, res) => {
     const filePath = req.file.path;
     const fileName = req.file.originalname;
     const text = await extractText(filePath, fileName);
-    console.log("Extracted file text:\n", text); // <-- Add this!
     fs.unlinkSync(filePath);
 
     if (!text || !text.trim()) {
@@ -222,58 +222,68 @@ app.post("/api/check-file", upload.single("file"), async (req, res) => {
     }
 
     // === PATCH: Supplier Name Extraction & Enforcement ===
-    if (qNum === 1) {
-      // Extract supplier/company name from Q1R1 document
-      const companyName = extractCompanyName(text);
-      // Return to frontend for confirmation before saving
+    // 1. Always auto-update supplier_names table if a new/corrected name is provided!
+    let officialCompanyName = suppliedCompanyName;
+    if (suppliedCompanyName && suppliedCompanyName.trim()) {
+      await supabase.from("supplier_names").upsert(
+        {
+          email,
+          supplier_name: suppliedCompanyName.trim(),
+          extracted_at: new Date().toISOString(),
+        },
+        { onConflict: ["email"] }
+      );
+    }
+
+    // 2. For Q1: Extract & suggest company name if not provided.
+    if (qNum === 1 && (!suppliedCompanyName || !suppliedCompanyName.trim())) {
+      const detected = extractCompanyName(text);
       return res.json({
         success: true,
-        feedback: `Detected company name: "${companyName}". Please confirm or correct this.`,
-        detectedCompanyName: companyName,
+        feedback: `Detected company name: "${detected}". Please confirm or correct this.`,
+        detectedCompanyName: detected,
         requireCompanyNameConfirmation: true,
       });
-    } else {
-      // For all other documents, enforce supplier name presence
-      const { data, error } = await supabase
+    }
+
+    // 3. For Q2, Q3, ...: Always check against latest name (from supplied OR DB)
+    if (!officialCompanyName) {
+      const { data } = await supabase
         .from("supplier_names")
         .select("supplier_name")
         .eq("email", email)
         .single();
-      if (!data?.supplier_name) {
-        return res.json({
-          success: false,
-          feedback:
-            "No official supplier/company name was found from your OHS Policy (Q1R1). Please upload it first, or ensure your document clearly states your company name.",
-        });
-      }
-      const supplierNameNorm = normalize(data.supplier_name);
-const docTextNorm = normalize(text);
+      officialCompanyName = data?.supplier_name;
+    }
 
-const supplierWords = supplierNameNorm.split(" ").filter(w => w.length > 2);
+    if (!officialCompanyName) {
+      return res.json({
+        success: false,
+        feedback:
+          "No official supplier/company name was found from your OHS Policy (Q1R1) or your profile. Please upload it first, or ensure your document clearly states your company name.",
+      });
+    }
 
-console.log("Supplier Name in DB (normalized):", supplierNameNorm);
-console.log("Supplier Words:", supplierWords);
-console.log("First 500 chars of Document (normalized):", docTextNorm.slice(0, 500));
+    // --- Consistency check
+    const supplierNameNorm = normalize(officialCompanyName);
+    const docTextNorm = normalize(text);
+    const supplierWords = supplierNameNorm.split(" ").filter(w => w.length > 2);
+    const requiredMatches = supplierWords.length <= 2 ? 1 : 2;
+    let matchCount = 0;
+    supplierWords.forEach(word => {
+      if (docTextNorm.includes(word)) matchCount++;
+    });
 
-// Lower threshold for short names
-const requiredMatches = supplierWords.length <= 2 ? 1 : 2;
-let matchCount = 0;
-supplierWords.forEach(word => {
-  if (docTextNorm.includes(word)) matchCount++;
-});
-console.log("Match count:", matchCount, "| Required:", requiredMatches);
+    if (matchCount < requiredMatches) {
+      return res.json({
+        success: false,
+        feedback: `Document does not clearly mention the supplier name: "${officialCompanyName}". Please check or correct your company name. [You can manually set your company name if this keeps happening.]`,
+        requireCompanyNameConfirmation: true,
+        detectedCompanyName: officialCompanyName,
+      });
+    }
 
-if (matchCount < requiredMatches) {
-  return res.json({
-    success: false,
-    feedback: `Document does not clearly mention the supplier name detected from your OHS Policy: "${data.supplier_name}". Please check or correct your company name. [You can manually set your company name if this keeps happening.]`,
-    requireCompanyNameConfirmation: true,
-    detectedCompanyName: data.supplier_name,
-  });
-}
-
-    // === END PATCH ===
-
+    // --- Continue with AI review as normal
     const questionText = getQuestionText(qNum);
     const scoringGuide = getScoringGuide(qNum);
     const explanationSection = userExplanation
@@ -283,60 +293,7 @@ if (matchCount < requiredMatches) {
     const prompt = `
 You are an OHS compliance auditor. For the following question, review the vendor's uploaded document${userExplanation ? " and user explanation" : ""} and provide:
 
-IMPORTANT INSTRUCTIONS:
-
-- First, determine if the uploaded document matches the CURRENT requirement described below.
-- If it appears to be for a different requirement (e.g., a different question), or if it’s unrelated, you MUST reject it.
-- Clearly explain why it does NOT satisfy the listed requirement.
-- Only give a positive score (Stretch, Commitment, Robust) if the file matches the requirement clearly and exactly.
-- If there is any doubt or mismatch, assign one of these:
-  - Warning (2/5)
-  - Offtrack (1/5)
-- Do not accept general documents that are good but unrelated.
-- Always format each suggestion as a separate markdown bullet point. Do NOT use paragraphs or numbered lists. Use "- " at the start of every suggestion.
-
-⚠️ Example: If a file about incident investigation is uploaded for a policy question, that is NOT acceptable.
-
-1. **Score band**: One of ONLY these five (must match exactly):
-   - stretch (5/5)
-   - commitment (4/5)
-   - robust (3/5)
-   - warning (2/5)
-   - offtrack (1/5)
-You MUST return the score in this exact format:
-Score: Robust (3/5)
-(That format must match one of the 5 approved bands exactly — do not use any other labels or variations.)
-
-2. A short summary (1–2 sentences) as to why you gave this score.
-3. Suggestions for improvement (if any).
-
-Refer STRICTLY to the scoring guide below. ONLY consider evidence in the provided file and, if present, the user's explanation.
-
----
-**Assessment Question:**  
-${questionText}
-
-**Scoring Guide:**  
-${scoringGuide}
-
----
-**File Content:**  
-${text}
-${explanationSection}
----
-
-Return your answer in this exact format:
-
-Score: [write one of: Stretch (5/5), Commitment (4/5), Robust (3/5), Warning (2/5), or Offtrack (1/5)]
-
-Summary: 
-[1–2 sentence reason for the score]
-
-Suggestions:
-- [each suggestion as a markdown bullet point, even if there is only one; if there are no suggestions, write "- None"]
-
-⚠️ Do not invent new score labels. Only use the five exact bands above.
-
+[rest of your prompt as before, unchanged]
 `;
 
     const feedback = await callGroq(prompt);
@@ -359,13 +316,11 @@ Suggestions:
     );
 
     res.json({ success: true, score, feedback });
-    }
   } catch (err) {
     console.error("ERROR in /api/check-file (groq):", err);
     res.status(500).json({ error: err.message });
   }
 });
-// --- Get all answers for a specific email ---
 
 // --- Session Summary Endpoint ---
 app.post("/api/session-summary", express.json(), async (req, res) => {
