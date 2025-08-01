@@ -359,6 +359,7 @@ Suggestions:
     );
 
     res.json({ success: true, score, feedback });
+    }
   } catch (err) {
     console.error("ERROR in /api/check-file (groq):", err);
     res.status(500).json({ error: err.message });
