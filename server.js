@@ -13,7 +13,7 @@ const supabase = createClient(
   process.env.SUPABASE_KEY,
 );
 
-const upload = multer({ dest: "tmp" });
+const upload = multer({ dest: "/tmp" });
 const app = express();
 const corsOptions = {
   origin: "https://vendoriq-chatbot.vercel.app",
